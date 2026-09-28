@@ -9,7 +9,8 @@ import {
   Download,
   Gauge,
   Activity,
-  Layers
+  Layers,
+  Scale
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -33,6 +34,7 @@ import { MetricCard } from '../components/MetricCard';
 import { ChartCard } from '../components/ChartCard';
 import { ResultsSummary } from '../components/ResultsSummary';
 import { AnsysContourVisualizer } from '../components/AnsysContourVisualizer';
+import { HeatBalanceMatrix } from '../components/HeatBalanceMatrix';
 import { generateAnsysApdlScript, calculateLiveEnvelopeMetrics } from '../services/api';
 
 interface SimulationPageProps {
@@ -52,7 +54,9 @@ export const Simulation: React.FC<SimulationPageProps> = ({
   onRunSimulation,
   onSaveForComparison
 }) => {
-  const [activeViewTab, setActiveViewTab] = useState<'3_graphs' | 'ansys_fea' | 'fea_comparison'>('3_graphs');
+  const [activeViewTab, setActiveViewTab] = useState<
+    '3_graphs' | 'heat_balance' | 'ansys_fea' | 'fea_comparison'
+  >('3_graphs');
   const [showDetailedTable, setShowDetailedTable] = useState(false);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
 
@@ -263,6 +267,19 @@ export const Simulation: React.FC<SimulationPageProps> = ({
 
           <button
             type="button"
+            onClick={() => setActiveViewTab('heat_balance')}
+            className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer ${
+              activeViewTab === 'heat_balance'
+                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <Scale className="w-4 h-4 text-amber-400" />
+            <span>Task 3: Heat Flow vs ΔT &amp; Balance</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setActiveViewTab('ansys_fea')}
             className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer ${
               activeViewTab === 'ansys_fea'
@@ -455,8 +472,17 @@ export const Simulation: React.FC<SimulationPageProps> = ({
           </div>
         </div>
       )}
+ 
+      {/* TAB 2: Task 3 Heat Flow vs Delta T & Energy Balance Matrix */}
+      {activeViewTab === 'heat_balance' && (
+        <HeatBalanceMatrix
+          config={config}
+          materials={materials}
+          simulationResults={results}
+        />
+      )}
 
-      {/* TAB 2: Actual ANSYS Thermal FEA Contours & Nodal Heat Flux */}
+      {/* TAB 3: Actual ANSYS Thermal FEA Contours & Nodal Heat Flux */}
       {activeViewTab === 'ansys_fea' && (
         <AnsysContourVisualizer
           config={config}

@@ -47,8 +47,12 @@ export const Optimization: React.FC<OptimizationPageProps> = ({
   onApplyCandidate,
   onSelectPage
 }) => {
-  const [selectedAssemblies, setSelectedAssemblies] = useState<string[]>(ALL_ASSEMBLIES.slice(0, 3));
-  const [selectedThicknesses, setSelectedThicknesses] = useState<number[]>([0.3, 0.4]);
+  const [selectedAssemblies, setSelectedAssemblies] = useState<string[]>([
+    'Adobe Composite',
+    'Stone Composite',
+    'Aerogel Ultra-Shield'
+  ]);
+  const [selectedThicknesses, setSelectedThicknesses] = useState<number[]>([0.3, 0.4, 0.5]);
   const [selectedShapes, setSelectedShapes] = useState<('rectangular' | 'cylindrical' | 'dome' | 'a_frame')[]>([
     'rectangular',
     'dome',
@@ -56,7 +60,7 @@ export const Optimization: React.FC<OptimizationPageProps> = ({
   ]);
   const [selectedSizes, setSelectedSizes] = useState<typeof SIZE_PRESETS>(SIZE_PRESETS.slice(0, 2));
   const [selectedAzimuths, setSelectedAzimuths] = useState<number[]>([0, 90, 180, 270]);
-  const [selectedWindowAreas, setSelectedWindowAreas] = useState<number[]>([1.5, 2.4]);
+  const [selectedWindowAreas, setSelectedWindowAreas] = useState<number[]>([1.5, 2.4, 3.6]);
   const [comfortThreshold, setComfortThreshold] = useState<number>(config.simulation.comfortThreshold);
 
   const [optResponse, setOptResponse] = useState<OptimizationResponse | null>(null);
@@ -226,7 +230,13 @@ export const Optimization: React.FC<OptimizationPageProps> = ({
               </p>
 
               {/* Key Specs Row */}
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 pt-2">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 pt-2">
+                <div className="p-2.5 bg-[#0B0F17] border border-emerald-800/80 rounded-lg">
+                  <div className="text-[11px] text-emerald-400 font-semibold">Thermal Comfort</div>
+                  <div className="text-xs font-mono font-bold text-emerald-300 mt-0.5">
+                    {finalEfficientDesign.comfort_hours} / 24 hrs ({finalEfficientDesign.comfort_percentage}%)
+                  </div>
+                </div>
                 <div className="p-2.5 bg-[#0B0F17] border border-slate-800 rounded-lg">
                   <div className="text-[11px] text-slate-400">Dimensions (LxWxH)</div>
                   <div className="text-xs font-mono font-semibold text-white mt-0.5">
@@ -520,6 +530,7 @@ export const Optimization: React.FC<OptimizationPageProps> = ({
                   <th className="py-2.5 px-2 text-right">Thickness</th>
                   <th className="py-2.5 px-2">Orientation</th>
                   <th className="py-2.5 px-2 text-right">Glazing</th>
+                  <th className="py-2.5 px-2 text-right text-emerald-400">Comfort Hours</th>
                   <th className="py-2.5 px-2 text-right">Min Temp</th>
                   <th className="py-2.5 px-2 text-right">Heat Loss</th>
                   <th className="py-2.5 px-2 text-right">Score</th>
@@ -565,6 +576,9 @@ export const Optimization: React.FC<OptimizationPageProps> = ({
                       </td>
                       <td className="py-2.5 px-2 text-right text-slate-300">
                         {cand.windowArea} m²
+                      </td>
+                      <td className="py-2.5 px-2 text-right font-bold text-emerald-400">
+                        {cand.comfort_hours}h ({cand.comfort_percentage}%)
                       </td>
                       <td
                         className={`py-2.5 px-2 text-right font-semibold ${

@@ -19,7 +19,8 @@ import {
 import {
   calculateLiveEnvelopeMetrics,
   generateAnsysApdlScript,
-  generateWorkbenchPythonScript
+  generateWorkbenchPythonScript,
+  generateShelterCadStl
 } from '../services/api';
 import { AnsysContourVisualizer } from '../components/AnsysContourVisualizer';
 
@@ -31,9 +32,9 @@ interface AnsysValidationProps {
 
 const WORKFLOW_STEPS = [
   { step: '01', title: 'Export Design & Boundary Conditions', desc: 'Generate parametric dimensions, multi-layer wall thicknesses, and time-dependent solar/convection loads from ShelterX.' },
-  { step: '02', title: 'Generate 3D Solid Geometry', desc: 'Create the bioclimatic enclosure (Walls, Roof, Floor slab, and Window/Door cutouts) in ANSYS SpaceClaim or DesignModeler.' },
-  { step: '03', title: 'Define Engineering Materials', desc: 'Input isotropic thermal conductivity k(T), density ρ, and specific heat capacity Cp into ANSYS Engineering Data.' },
-  { step: '04', title: 'Finite Element Discretization (Mesh)', desc: 'Mesh composite solid layers using SOLID70/SOLID278 8-node thermal brick elements with refinement across thin insulation cores.' },
+  { step: '02', title: 'Automated 3D Solid Geometry (Zero Manual CAD)', desc: 'Option A: Open exported shelterx_3d_cad_model.stl directly in SpaceClaim (File > Open). Option B: Run .inp in APDL which builds 3D solid geometry automatically via BLOCK commands.' },
+  { step: '03', title: 'Define Engineering Materials', desc: 'Input isotropic thermal conductivity k(T), density ρ, and specific heat capacity Cp into ANSYS Engineering Data (pre-configured in .inp).' },
+  { step: '04', title: 'Finite Element Discretization (Mesh)', desc: 'Mesh composite solid layers using SOLID70/SOLID278 8-node thermal brick elements (automated inside the .inp script).' },
   { step: '05', title: 'Internal Convection & Contact Resistance', desc: 'Apply interior natural convection film coefficient (h_in) and ground contact thermal resistance on the floor slab underside.' },
   { step: '06', title: 'Time-Varying Ambient Convection', desc: 'Import 24-hour tabular outdoor ambient temperature T_out(t) and wind-speed adjusted film coefficient h_out(t).' },
   { step: '07', title: 'Solar Heat Flux Radiation Loads', desc: 'Apply directional solar heat flux q_solar(t) to sun-facing facade surfaces according to shelter solar azimuth.' },
@@ -81,6 +82,18 @@ export const AnsysValidation: React.FC<AnsysValidationProps> = ({
     a.click();
     URL.revokeObjectURL(url);
     triggerNotice('Downloaded ANSYS Workbench Python Automation Script (.py)');
+  };
+
+  const handleDownloadCadStl = () => {
+    const stlContent = generateShelterCadStl(config, liveMetrics.totalThicknessM);
+    const blob = new Blob([stlContent], { type: 'model/stl;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `shelterx_3d_cad_model_${config.location.name.toLowerCase()}.stl`;
+    a.click();
+    URL.revokeObjectURL(url);
+    triggerNotice('Downloaded 3D CAD Model (.stl) for SpaceClaim / DesignModeler');
   };
 
   const handleExportBoundaryCsv = () => {
@@ -147,7 +160,7 @@ export const AnsysValidation: React.FC<AnsysValidationProps> = ({
           </p>
         </div>
 
-        {/* 4 Direct Export Actions */}
+        {/* Direct Export Actions */}
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
           {downloadNotice && (
             <span className="text-xs font-mono text-emerald-400 flex items-center gap-1 bg-emerald-950/40 border border-emerald-800 px-2.5 py-1.5 rounded-lg">
@@ -159,11 +172,21 @@ export const AnsysValidation: React.FC<AnsysValidationProps> = ({
           <button
             type="button"
             onClick={handleDownloadApdl}
-            className="px-4 py-2.5 bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-semibold text-xs rounded-lg flex items-center gap-2 whitespace-nowrap cursor-pointer"
-            title="Download APDL .inp script"
+            className="px-4 py-2.5 bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-semibold text-xs rounded-lg flex items-center gap-2 whitespace-nowrap cursor-pointer shadow-sm shadow-cyan-900/30"
+            title="Download APDL .inp script with automated 3D geometry & meshing"
           >
             <FileCode className="w-4 h-4 fill-slate-950" />
             <span>ANSYS APDL (.inp)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleDownloadCadStl}
+            className="px-3.5 py-2.5 bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-700/80 text-emerald-300 font-semibold text-xs rounded-lg flex items-center gap-2 whitespace-nowrap cursor-pointer"
+            title="Download 3D CAD Model (.stl) to open directly in SpaceClaim with zero manual modeling"
+          >
+            <Layers className="w-4 h-4 text-emerald-400" />
+            <span>3D CAD Model (.stl)</span>
           </button>
 
           <button
@@ -197,6 +220,36 @@ export const AnsysValidation: React.FC<AnsysValidationProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Automated Workflow Notice Banner */}
+      <div className="bg-cyan-950/30 border border-cyan-800/60 rounded-xl p-4 flex items-start gap-3.5">
+        <div className="p-2 bg-cyan-900/50 border border-cyan-700/60 rounded-lg text-cyan-300 mt-0.5 shrink-0">
+          <FileCode className="w-5 h-5" />
+        </div>
+        <div className="space-y-1">
+          <h3 className="text-sm font-semibold text-cyan-200">
+            Zero Manual Modeling Needed — 2 Ways to Run in ANSYS:
+          </h3>
+          <p className="text-xs text-slate-300 leading-relaxed">
+            You do <strong>not</strong> need to manually draw 3D boxes or configure meshes in SpaceClaim. Use either automated path:
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2 text-xs">
+            <div className="p-3 bg-[#0B0F17] border border-slate-800 rounded-lg space-y-1">
+              <span className="font-semibold text-cyan-300">Method 1: 100% Automated APDL (.inp)</span>
+              <p className="text-slate-400">
+                In ANSYS Mechanical APDL, simply click <code className="text-cyan-300 bg-slate-900 px-1 py-0.5 rounded">File &gt; Read Input from...</code> and pick the downloaded <code className="text-slate-200">.inp</code> file. It automatically generates the 3D solid geometry (BLOCK primitives), extracts surface named selections, meshes with SOLID70 elements, applies materials, and solves the 24h transient simulation.
+              </p>
+            </div>
+            <div className="p-3 bg-[#0B0F17] border border-slate-800 rounded-lg space-y-1">
+              <span className="font-semibold text-emerald-300">Method 2: SpaceClaim 1-Click CAD Import (.stl)</span>
+              <p className="text-slate-400">
+                Download the <strong className="text-emerald-300">3D CAD Model (.stl)</strong> and open it in SpaceClaim (<code className="text-emerald-300 bg-slate-900 px-1 py-0.5 rounded">File &gt; Open</code>). SpaceClaim automatically imports the complete 3D shelter with correct wall thicknesses and window openings.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
 
       {/* Engineering Pipeline Diagram */}
       <div className="bg-[#111827] border border-slate-800/90 rounded-xl p-4 grid grid-cols-1 sm:grid-cols-4 gap-3 items-center text-xs">

@@ -1,6 +1,1 @@
-{
-  "name": "ShelterX",
-  "description": "Area-Specific Passive Thermal Shelter Design, Transient Simulation, Multi-Parameter Optimization, and ANSYS Validation Platform for High-Altitude Cold Regions (SIH DRDO).",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
+{"name":"ShelterX","description":"Area-Specific Passive Thermal Shelter Design, Transient Simulation, Multi-Parameter Optimization, and ANSYS Validation Platform for High-Altitude Cold Regions (SIH DRDO).","requestFramePermissions":[],"majorCapabilities":["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]}

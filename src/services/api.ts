@@ -657,21 +657,31 @@ export function executeGridSearchLocal(
 
               const sim = executeTransientSimulationLocal(candidateConfig, materials);
               const s = sim.summary;
-              const meetsConstraint = s.min_indoor_temp >= comfortThreshold;
+              // Viability constraint: shelter maintains comfort for at least 45% of the day, or min temp >= comfortThreshold
+              const meetsConstraint =
+                s.comfort_hours >= Math.ceil(s.total_hours * 0.45) ||
+                s.min_indoor_temp >= comfortThreshold;
 
-              // Multi-Objective Scoring:
-              // 1. Thermal Comfort Margin (40% weight): Reward higher min temp
-              const comfortScore = Math.min(40, Math.max(0, (s.min_indoor_temp - comfortThreshold + 5) * 4));
-              // 2. Heat Loss Efficiency (35% weight): Lower heat loss per m3 volume
+              // Multi-Objective Scoring (Total 100 points):
+              // 1. Thermal Comfort Maintenance (50% weight):
+              //    Directly rewards maximum hours of indoor comfort (T_in >= T_comfort)
+              const comfortHoursScore = (s.comfort_hours / Math.max(1, s.total_hours)) * 50;
+
+              // 2. Minimum Night Temperature Buffer (20% weight):
+              //    Prevents severe sub-zero plunges during coldest pre-dawn hours
+              const minTempScore = Math.max(0, Math.min(20, (s.min_indoor_temp - (comfortThreshold - 8)) * 2.5));
+
+              // 3. Heat Loss Efficiency (20% weight):
+              //    Minimizes conductive and infiltration loss per m³ volume
               const heatLossDensity = s.total_heat_loss_kwh / Math.max(1, s.geometry.volume);
-              const efficiencyScore = Math.max(0, 35 - heatLossDensity * 12);
-              // 3. Compactness (S/V ratio) (15% weight)
-              const compactnessScore = Math.max(0, 15 - (s.geometry.surface_to_volume_ratio - 1.0) * 10);
-              // 4. Solar capture ratio (10% weight)
-              const solarScore = Math.min(10, (s.total_solar_kwh / Math.max(1, s.geometry.floor_area)) * 1.5);
+              const efficiencyScore = Math.max(0, 20 - heatLossDensity * 6);
+
+              // 4. Solar Gain & Compactness (10% weight):
+              const solarRatio = s.total_solar_kwh / Math.max(s.total_heat_loss_kwh, 1);
+              const solarScore = Math.min(10, solarRatio * 8);
 
               const compositeScore = Number(
-                (comfortScore + efficiencyScore + compactnessScore + solarScore).toFixed(1)
+                (comfortHoursScore + minTempScore + efficiencyScore + solarScore).toFixed(1)
               );
 
               candidates.push({
@@ -712,14 +722,22 @@ export function executeGridSearchLocal(
 
   // Sort candidates:
   // 1. Feasible candidates first (meets_constraint = true)
-  // 2. Highest composite score
-  // 3. Lowest heat loss
+  // 2. HIGHEST COMFORT HOURS FIRST (primary objective of thermal comfort maintenance!)
+  // 3. Highest composite score
+  // 4. Highest minimum temperature
+  // 5. Lowest heat loss
   candidates.sort((a, b) => {
     if (a.meets_constraint !== b.meets_constraint) {
       return a.meets_constraint ? -1 : 1;
     }
-    if (Math.abs(a.score - b.score) > 0.5) {
+    if (b.comfort_hours !== a.comfort_hours) {
+      return b.comfort_hours - a.comfort_hours;
+    }
+    if (Math.abs(b.score - a.score) > 0.5) {
       return b.score - a.score;
+    }
+    if (Math.abs(b.min_temp - a.min_temp) > 0.2) {
+      return b.min_temp - a.min_temp;
     }
     return a.heat_loss_kwh - b.heat_loss_kwh;
   });
@@ -733,14 +751,14 @@ export function executeGridSearchLocal(
 
   if (bestDesign) {
     bestDesign.isBestDesign = true;
-    bestDesign.efficiency_justification = `The ${bestDesign.assembly} with ${bestDesign.shape.toUpperCase()} envelope (${Math.round(bestDesign.thickness * 1000)}mm thickness) oriented ${bestDesign.orientationLabel} achieved the optimal trade-off: maintaining a minimum indoor temperature of ${bestDesign.min_temp.toFixed(1)}°C (comfort threshold ${comfortThreshold}°C) with only ${bestDesign.heat_loss_kwh.toFixed(1)} kWh total 24h heat loss and an efficient S/V ratio of ${bestDesign.surface_to_volume_ratio}. Zero auxiliary fossil fuel heating is required.`;
+    bestDesign.efficiency_justification = `The ${bestDesign.assembly} with ${bestDesign.shape.toUpperCase()} envelope (${Math.round(bestDesign.thickness * 1000)}mm thickness) oriented ${bestDesign.orientationLabel} achieved peak thermal comfort maintenance: maximizing comfortable indoor duration to ${bestDesign.comfort_hours} hours (${bestDesign.comfort_percentage}%) at >= ${comfortThreshold}°C while reducing total heat loss to ${bestDesign.heat_loss_kwh.toFixed(1)} kWh with an aerodynamic S/V ratio of ${bestDesign.surface_to_volume_ratio}.`;
   }
 
   return {
     total_combinations: candidates.length,
     feasible_count: feasible.length,
     comfort_threshold: comfortThreshold,
-    objective_description: `Parametric evaluation of Material + Size + Shape + Orientation + Glazing combinations satisfying Minimum Indoor Temperature >= ${comfortThreshold}°C and ranked by Lowest 24-Hour Total Heat Loss (kWh).`,
+    objective_description: `Parametric evaluation of Material + Size + Shape + Orientation + Glazing combinations prioritizing Maximum Thermal Comfort Hours (>= ${comfortThreshold}°C) and Minimum Envelope Heat Loss.`,
     final_efficient_design: bestDesign,
     candidates
   };
@@ -904,6 +922,286 @@ export function parseWeatherCsvText(csvText: string): HourlyWeatherPoint[] {
   return points;
 }
 
+export interface HeatBalanceComponent {
+  name: string;
+  category: string;
+  areaOrVolume: number;
+  unit: string;
+  uValue: number;
+  uaValue: number;
+  cumulativeLossKwh: number;
+  percentageShare: number;
+  color: string;
+}
+
+export interface HeatFlowDeltaTPoint {
+  deltaT: number;
+  hour: number;
+  timeLabel: string;
+  totalLossW: number;
+  wallLossW: number;
+  roofLossW: number;
+  floorLossW: number;
+  windowLossW: number;
+  doorLossW: number;
+  infiltrationLossW: number;
+  solarGainW: number;
+  theoreticalUaLossW: number;
+}
+
+export interface Task3HeatFlowDetails {
+  totalConductanceUA: number;
+  envelopeConductanceUA: number;
+  infiltrationConductanceUA: number;
+  totalPeriodLossKwh: number;
+  totalPeriodSolarGainKwh: number;
+  netThermalDeficitKwh: number;
+  periodHours: number;
+  avgDeltaT: number;
+  minDeltaT: number;
+  maxDeltaT: number;
+  balancePointDeltaT: number;
+  totalEnvelopeAreaM2: number;
+  components: HeatBalanceComponent[];
+  sortedDeltaTPoints: HeatFlowDeltaTPoint[];
+  sensitivityTable: Array<{
+    deltaT: number;
+    lossRateW: number;
+    lossRateKw: number;
+    heatFluxWm2: number;
+    dailyKwh: number;
+    keroseneLitersPerDay: number;
+    dailyCostInr: number;
+  }>;
+}
+
+export function calculateTask3HeatFlowDetails(
+  config: ShelterConfig,
+  materials: MaterialItem[],
+  results: SimulationResponse
+): Task3HeatFlowDetails {
+  const { hourly_results } = results;
+  const liveMetrics = calculateLiveEnvelopeMetrics(config, materials);
+  const geom = liveMetrics.geometry;
+
+  const matMap: Record<string, MaterialItem> = {};
+  for (const m of INITIAL_MATERIALS) matMap[m.name] = m;
+  for (const m of materials) matMap[m.name] = m;
+
+  const hIn = Math.max(2.0, config.simulation.insideConvectionH || 8.0);
+  const hOut = 20.0;
+
+  // U-values & UA calculations
+  const uWall = liveMetrics.uValue;
+  const uaWall = uWall * geom.net_wall_area;
+
+  const roofMat = matMap[config.roof.material] || matMap['Adobe'];
+  const rRoofUnit = 1 / hIn + Math.max(config.roof.thickness, 0.01) / Math.max(roofMat.k, 0.01) + 1 / hOut;
+  const uRoof = Number((1 / rRoofUnit).toFixed(3));
+  const uaRoof = uRoof * geom.roof_area;
+
+  const floorMat = matMap[config.floor.material] || matMap['Adobe'];
+  const rFloorUnit = 1 / hIn + Math.max(config.floor.thickness, 0.01) / Math.max(floorMat.k, 0.01) + 0.35;
+  const uFloor = Number((1 / rFloorUnit).toFixed(3));
+  const uaFloor = uFloor * geom.floor_area;
+
+  let totalWinArea = 0;
+  let uaWindows = 0;
+  for (const win of config.windows) {
+    const winProps = WINDOW_PROPS[win.type] || WINDOW_PROPS.double_glazed;
+    totalWinArea += win.area;
+    uaWindows += winProps.u_value * win.area;
+  }
+  const uWindowAvg = totalWinArea > 0 ? Number((uaWindows / totalWinArea).toFixed(3)) : 2.7;
+
+  const uDoor = config.door.uValue ?? 1.8;
+  const uaDoor = uDoor * Math.max(0, config.door.area);
+
+  // Infiltration UA
+  const ach = Math.max(0, config.simulation.ach);
+  const vDotM3S = (ach * geom.volume) / 3600;
+  const uaInfiltration = 1.225 * vDotM3S * 1005; // W/K
+
+  const envelopeConductanceUA = uaWall + uaRoof + uaFloor + uaWindows + uaDoor;
+  const totalConductanceUA = envelopeConductanceUA + uaInfiltration;
+  const totalEnvelopeAreaM2 = geom.net_wall_area + geom.roof_area + geom.floor_area + totalWinArea + config.door.area;
+
+  // Cumulative energy losses over the period
+  let cumWallLossWh = 0;
+  let cumRoofLossWh = 0;
+  let cumFloorLossWh = 0;
+  let cumWindowLossWh = 0;
+  let cumDoorLossWh = 0;
+  let cumInfLossWh = 0;
+  let cumSolarGainWh = 0;
+  let cumTotalLossWh = 0;
+
+  const deltaTVals: number[] = [];
+
+  const rawDeltaTPoints: HeatFlowDeltaTPoint[] = hourly_results.map((r) => {
+    const dt = Number((r.indoor_temperature - r.outdoor_temperature).toFixed(2));
+    deltaTVals.push(dt);
+
+    cumWallLossWh += r.wall_heat_loss;
+    cumRoofLossWh += r.roof_heat_loss;
+    cumFloorLossWh += r.floor_heat_loss;
+    cumWindowLossWh += r.window_heat_loss;
+    cumDoorLossWh += r.door_heat_loss;
+    cumInfLossWh += r.infiltration_loss;
+    cumSolarGainWh += r.solar_gain;
+    cumTotalLossWh += r.total_heat_loss;
+
+    return {
+      deltaT: dt,
+      hour: r.hour,
+      timeLabel: r.time_label,
+      totalLossW: Math.round(r.total_heat_loss),
+      wallLossW: Math.round(r.wall_heat_loss),
+      roofLossW: Math.round(r.roof_heat_loss),
+      floorLossW: Math.round(r.floor_heat_loss),
+      windowLossW: Math.round(r.window_heat_loss),
+      doorLossW: Math.round(r.door_heat_loss),
+      infiltrationLossW: Math.round(r.infiltration_loss),
+      solarGainW: Math.round(r.solar_gain),
+      theoreticalUaLossW: Math.round(totalConductanceUA * Math.max(0, dt))
+    };
+  });
+
+  const totalPeriodLossKwh = Number((cumTotalLossWh / 1000).toFixed(2));
+  const totalPeriodSolarGainKwh = Number((cumSolarGainWh / 1000).toFixed(2));
+  const netThermalDeficitKwh = Number(Math.max(0, totalPeriodLossKwh - totalPeriodSolarGainKwh).toFixed(2));
+
+  // Percentage shares
+  const safeTotalLoss = Math.max(cumTotalLossWh, 1);
+  const wallShare = Number(((cumWallLossWh / safeTotalLoss) * 100).toFixed(1));
+  const roofShare = Number(((cumRoofLossWh / safeTotalLoss) * 100).toFixed(1));
+  const floorShare = Number(((cumFloorLossWh / safeTotalLoss) * 100).toFixed(1));
+  const winShare = Number(((cumWindowLossWh / safeTotalLoss) * 100).toFixed(1));
+  const doorShare = Number(((cumDoorLossWh / safeTotalLoss) * 100).toFixed(1));
+  const infShare = Number(((cumInfLossWh / safeTotalLoss) * 100).toFixed(1));
+
+  const components: HeatBalanceComponent[] = [
+    {
+      name: `External Walls (${config.walls.assemblyName})`,
+      category: 'Envelope Walls',
+      areaOrVolume: geom.net_wall_area,
+      unit: 'm²',
+      uValue: Number(uWall.toFixed(3)),
+      uaValue: Number(uaWall.toFixed(2)),
+      cumulativeLossKwh: Number((cumWallLossWh / 1000).toFixed(2)),
+      percentageShare: wallShare,
+      color: '#38BDF8'
+    },
+    {
+      name: `Roof Assembly (${config.roof.material})`,
+      category: 'Roof',
+      areaOrVolume: geom.roof_area,
+      unit: 'm²',
+      uValue: uRoof,
+      uaValue: Number(uaRoof.toFixed(2)),
+      cumulativeLossKwh: Number((cumRoofLossWh / 1000).toFixed(2)),
+      percentageShare: roofShare,
+      color: '#F472B6'
+    },
+    {
+      name: `Floor Foundation Slab (${config.floor.material})`,
+      category: 'Floor Foundation',
+      areaOrVolume: geom.floor_area,
+      unit: 'm²',
+      uValue: uFloor,
+      uaValue: Number(uaFloor.toFixed(2)),
+      cumulativeLossKwh: Number((cumFloorLossWh / 1000).toFixed(2)),
+      percentageShare: floorShare,
+      color: '#A78BFA'
+    },
+    {
+      name: `Glazing / Windows (${config.windows.length} units)`,
+      category: 'Glazing (Windows)',
+      areaOrVolume: totalWinArea,
+      unit: 'm²',
+      uValue: uWindowAvg,
+      uaValue: Number(uaWindows.toFixed(2)),
+      cumulativeLossKwh: Number((cumWindowLossWh / 1000).toFixed(2)),
+      percentageShare: winShare,
+      color: '#FBBF24'
+    },
+    {
+      name: `Access Door (${config.door.area} m²)`,
+      category: 'Door',
+      areaOrVolume: config.door.area,
+      unit: 'm²',
+      uValue: uDoor,
+      uaValue: Number(uaDoor.toFixed(2)),
+      cumulativeLossKwh: Number((cumDoorLossWh / 1000).toFixed(2)),
+      percentageShare: doorShare,
+      color: '#FB923C'
+    },
+    {
+      name: `Air Infiltration / Ventilation (${ach} ACH)`,
+      category: 'Infiltration & Air Exchange',
+      areaOrVolume: geom.volume,
+      unit: 'm³ (volume)',
+      uValue: Number((uaInfiltration / Math.max(geom.volume, 1)).toFixed(3)),
+      uaValue: Number(uaInfiltration.toFixed(2)),
+      cumulativeLossKwh: Number((cumInfLossWh / 1000).toFixed(2)),
+      percentageShare: infShare,
+      color: '#34D399'
+    }
+  ];
+
+  const sortedDeltaTPoints = [...rawDeltaTPoints].sort((a, b) => a.deltaT - b.deltaT);
+
+  const avgDeltaT = deltaTVals.length > 0 ? Number((deltaTVals.reduce((a, b) => a + b, 0) / deltaTVals.length).toFixed(1)) : 20;
+  const minDeltaT = deltaTVals.length > 0 ? Math.min(...deltaTVals) : 5;
+  const maxDeltaT = deltaTVals.length > 0 ? Math.max(...deltaTVals) : 35;
+
+  const daylightPoints = hourly_results.filter((r) => r.solar_gain > 50);
+  const avgDaylightSolarW = daylightPoints.length > 0
+    ? daylightPoints.reduce((acc, r) => acc + r.solar_gain, 0) / daylightPoints.length
+    : 1200;
+  const balancePointDeltaT = Number((avgDaylightSolarW / Math.max(totalConductanceUA, 1)).toFixed(1));
+
+  // Sensitivity table at standard deltaT steps
+  const standardSteps = [5, 10, 15, 20, 25, 30, 35, 40];
+  const sensitivityTable = standardSteps.map((dt) => {
+    const lossW = Math.round(totalConductanceUA * dt);
+    const lossKw = Number((lossW / 1000).toFixed(2));
+    const flux = Number((lossW / Math.max(totalEnvelopeAreaM2, 1)).toFixed(1));
+    const dailyKwh = Number(((lossW * 24) / 1000).toFixed(1));
+    // 1 L of SKO kerosene ≈ 10 kWh thermal, 70% bukhari efficiency = 7.0 kWh useful heat per liter
+    const kerosene = Number((dailyKwh / 7.0).toFixed(2));
+    const logisticsCostPerLiterInr = 180; // High-altitude Ladakh airlift/convoy transport cost
+    const dailyCostInr = Math.round(kerosene * logisticsCostPerLiterInr);
+    return {
+      deltaT: dt,
+      lossRateW: lossW,
+      lossRateKw: lossKw,
+      heatFluxWm2: flux,
+      dailyKwh,
+      keroseneLitersPerDay: kerosene,
+      dailyCostInr
+    };
+  });
+
+  return {
+    totalConductanceUA: Number(totalConductanceUA.toFixed(2)),
+    envelopeConductanceUA: Number(envelopeConductanceUA.toFixed(2)),
+    infiltrationConductanceUA: Number(uaInfiltration.toFixed(2)),
+    totalPeriodLossKwh,
+    totalPeriodSolarGainKwh,
+    netThermalDeficitKwh,
+    periodHours: hourly_results.length,
+    avgDeltaT,
+    minDeltaT,
+    maxDeltaT,
+    balancePointDeltaT,
+    totalEnvelopeAreaM2: Number(totalEnvelopeAreaM2.toFixed(2)),
+    components,
+    sortedDeltaTPoints,
+    sensitivityTable
+  };
+}
+
 // ANSYS Export Helper Functions (Used directly by Simulation and Optimization)
 export function generateAnsysApdlScript(
   config: ShelterConfig,
@@ -914,19 +1212,84 @@ export function generateAnsysApdlScript(
   for (const m of INITIAL_MATERIALS) matMap[m.name] = m;
   for (const m of materials) matMap[m.name] = m;
 
+  const L = Math.max(1.5, config.geometry.length);
+  const W = Math.max(1.5, config.geometry.width);
+  const H = Math.max(1.8, config.geometry.height);
+  const tWall = Math.max(0.1, totalWallThicknessM || 0.4);
+  const tRoof = Math.max(0.05, config.roof.thickness || 0.2);
+  const tFloor = Math.max(0.05, config.floor.thickness || 0.15);
+
   const lines: string[] = [
     '! =====================================================================',
-    '! ShelterX -> ANSYS Mechanical APDL Transient Thermal Validation Script',
-    `! Problem Statement: SIH26051 DRDO Defence Cold Region Bioclimatic Shelter`,
+    '! ShelterX -> Automated ANSYS APDL 3D Geometry, Mesh & Transient Thermal Script',
+    '! Sponsoring Organization: DRDO (SIH26051 Cold Region Passive Shelter)',
     `! Candidate Region : ${config.location.name} (Elevation: ${config.location.elevation}m, Lat: ${config.location.latitude}N)`,
-    `! Geometry         : ${config.geometry.length}m x ${config.geometry.width}m x ${config.geometry.height}m (${config.geometry.shape})`,
-    `! Wall Assembly    : ${config.walls.assemblyName} (Total Wall Thickness = ${totalWallThicknessM} m)`,
+    `! Enclosure Size   : ${L.toFixed(2)}m (L) x ${W.toFixed(2)}m (W) x ${H.toFixed(2)}m (H) [Shape: ${config.geometry.shape}]`,
+    `! Wall Assembly    : ${config.walls.assemblyName} (Total Wall Thickness = ${tWall.toFixed(3)}m)`,
     `! Orientation      : Azimuth ${config.geometry.orientationAzimuth}° (${config.geometry.orientationLabel || 'South'})`,
+    '! NOTE: Fully automated. Generates 3D solid geometry, meshes, and solves in 1 click.',
     '! =====================================================================',
+    '/CLEAR,NOSTART',
     '/PREP7',
-    '/TITLE, ShelterX Candidate Transient Thermal FEA Validation',
+    '/TITLE, ShelterX Automated 3D Bioclimatic Shelter Transient FEA',
+    '',
+    '! ---------------------------------------------------------------------',
+    '! STEP 1: AUTOMATED 3D PARAMETRIC GEOMETRY CREATION (NO MANUAL CAD NEEDED)',
+    '! ---------------------------------------------------------------------',
+    `L_OUT = ${L.toFixed(3)}`,
+    `W_OUT = ${W.toFixed(3)}`,
+    `H_OUT = ${H.toFixed(3)}`,
+    `T_WALL = ${tWall.toFixed(3)}`,
+    `T_ROOF = ${tRoof.toFixed(3)}`,
+    `T_FLOOR = ${tFloor.toFixed(3)}`,
+    '',
+    '! Create outer solid bounding volume',
+    'BLOCK, 0, L_OUT, 0, W_OUT, 0, H_OUT',
+    '',
+    '! Create inner habitable cavity volume',
+    'BLOCK, T_WALL, L_OUT-T_WALL, T_WALL, W_OUT-T_WALL, T_FLOOR, H_OUT-T_ROOF',
+    '',
+    '! Boolean cut: Subtract inner cavity from outer block to create hollow solid shelter',
+    'VSBV, 1, 2',
+    'NUMCMP, VOLU',
+    'NUMCMP, AREA',
+    '',
+    '! ---------------------------------------------------------------------',
+    '! STEP 2: AUTOMATIC NAMED COMPONENT SELECTION (NO MANUAL SELECTION NEEDED)',
+    '! ---------------------------------------------------------------------',
+    '! 2.1 Floor slab foundation underside (Z = 0)',
+    'ASEL, S, LOC, Z, 0',
+    'CM, FLOOR_SLAB, AREA',
+    '',
+    '! 2.2 Roof top exterior surface (Z = H_OUT)',
+    'ASEL, S, LOC, Z, H_OUT',
+    'CM, ROOF_SURFACE, AREA',
+    '',
+    '! 2.3 Exterior lateral walls (all 4 exterior perimeter facades)',
+    'ASEL, S, LOC, X, 0',
+    'ASEL, A, LOC, X, L_OUT',
+    'ASEL, A, LOC, Y, 0',
+    'ASEL, A, LOC, Y, W_OUT',
+    'ASEL, R, LOC, Z, 0.01, H_OUT-0.01',
+    'CM, EXTERIOR_WALLS, AREA',
+    '',
+    '! 2.4 Solar-Facing facade (South wall at Y = 0 in standard local coordinates)',
+    'ASEL, S, LOC, Y, 0',
+    'ASEL, R, LOC, Z, 0.01, H_OUT-0.01',
+    'CM, SOLAR_FACING_WALL, AREA',
+    '',
+    '! 2.5 Glazing / Window region on south facade',
+    'ASEL, S, LOC, Y, 0',
+    'ASEL, R, LOC, Z, 0.8, 1.8',
+    'CM, GLAZING_SURFACE, AREA',
+    '',
+    'ALLSEL, ALL',
+    '',
+    '! ---------------------------------------------------------------------',
+    '! STEP 3: ELEMENT DEFINITIONS & ENGINEERING MATERIAL PROPERTIES',
+    '! ---------------------------------------------------------------------',
     'ET,1,SOLID70          ! 3D 8-Node Thermal Solid Element for Envelope',
-    'ET,2,SHELL131         ! 3D 4-Node Thermal Shell for Glazing Layers',
+    'KEYOPT,1,8,0',
     ''
   ];
 
@@ -943,8 +1306,21 @@ export function generateAnsysApdlScript(
   });
 
   lines.push(
-    '! Initial Thermal State (Uniform Initial Temperature)',
-    `TUNIF,${config.simulation.initialTemperature}`,
+    '! ---------------------------------------------------------------------',
+    '! STEP 4: AUTOMATED 3D FINITE ELEMENT MESH GENERATION',
+    '! ---------------------------------------------------------------------',
+    'TYPE, 1',
+    'MAT, 1',
+    'ESIZE, 0.30           ! Global element edge size (0.30 m)',
+    'MSHKEY, 0             ! Free smart mesh generation',
+    'SMRT, 4',
+    'VMESH, ALL            ! Automatically mesh all 3D solid volumes',
+    'ALLSEL, ALL',
+    '',
+    '! ---------------------------------------------------------------------',
+    '! STEP 5: INITIAL CONDITIONS & TRANSIENT SOLVER EXECUTION',
+    '! ---------------------------------------------------------------------',
+    `TUNIF,${config.simulation.initialTemperature}   ! Uniform Initial Temperature`,
     '',
     '/SOLU',
     'ANTYPE,TRANS          ! Transient Thermal Analysis',
@@ -971,8 +1347,105 @@ export function generateAnsysApdlScript(
     );
   });
 
-  lines.push('FINISH', '/POST1', 'PLNSOL,TEMP           ! Plot Nodal Temperature Contours');
+  lines.push(
+    '',
+    '! ---------------------------------------------------------------------',
+    '! STEP 6: POST-PROCESSING & 3D TEMPERATURE CONTOUR VISUALIZATION',
+    '! ---------------------------------------------------------------------',
+    'FINISH',
+    '/POST1',
+    'SET, LAST             ! Read final time step results',
+    '/VIEW, 1, 1, 1, 1     ! Set 3D Isometric View',
+    '/ANG, 1',
+    '/AUTO, 1',
+    'PLNSOL, TEMP          ! Plot 3D Nodal Temperature Contours',
+    '/IMAGE, SAVE, shelterx_transient_contour, PNG'
+  );
+
   return lines.join('\n');
+}
+
+export function generateShelterCadStl(
+  config: ShelterConfig,
+  totalWallThicknessM: number
+): string {
+  const L = Math.max(1.5, config.geometry.length);
+  const W = Math.max(1.5, config.geometry.width);
+  const H = Math.max(1.8, config.geometry.height);
+  const tw = Math.max(0.1, totalWallThicknessM || 0.4);
+  const tr = Math.max(0.05, config.roof.thickness || 0.2);
+  const tf = Math.max(0.05, config.floor.thickness || 0.15);
+
+  const facets: string[] = ['solid ShelterX_Bioclimatic_Shelter'];
+
+  function addQuad(
+    p1: [number, number, number],
+    p2: [number, number, number],
+    p3: [number, number, number],
+    p4: [number, number, number],
+    normal: [number, number, number]
+  ) {
+    const [nx, ny, nz] = normal;
+    facets.push(
+      `  facet normal ${nx} ${ny} ${nz}`,
+      `    outer loop`,
+      `      vertex ${p1[0].toFixed(4)} ${p1[1].toFixed(4)} ${p1[2].toFixed(4)}`,
+      `      vertex ${p2[0].toFixed(4)} ${p2[1].toFixed(4)} ${p2[2].toFixed(4)}`,
+      `      vertex ${p3[0].toFixed(4)} ${p3[1].toFixed(4)} ${p3[2].toFixed(4)}`,
+      `    endloop`,
+      `  endfacet`,
+      `  facet normal ${nx} ${ny} ${nz}`,
+      `    outer loop`,
+      `      vertex ${p1[0].toFixed(4)} ${p1[1].toFixed(4)} ${p1[2].toFixed(4)}`,
+      `      vertex ${p3[0].toFixed(4)} ${p3[1].toFixed(4)} ${p3[2].toFixed(4)}`,
+      `      vertex ${p4[0].toFixed(4)} ${p4[1].toFixed(4)} ${p4[2].toFixed(4)}`,
+      `    endloop`,
+      `  endfacet`
+    );
+  }
+
+  function addBox(
+    x1: number, x2: number,
+    y1: number, y2: number,
+    z1: number, z2: number
+  ) {
+    // Bottom (-Z)
+    addQuad([x1, y1, z1], [x2, y1, z1], [x2, y2, z1], [x1, y2, z1], [0, 0, -1]);
+    // Top (+Z)
+    addQuad([x1, y1, z2], [x1, y2, z2], [x2, y2, z2], [x2, y1, z2], [0, 0, 1]);
+    // Front (-Y)
+    addQuad([x1, y1, z1], [x1, y1, z2], [x2, y1, z2], [x2, y1, z1], [0, -1, 0]);
+    // Back (+Y)
+    addQuad([x2, y2, z1], [x2, y2, z2], [x1, y2, z2], [x1, y2, z1], [0, 1, 0]);
+    // Left (-X)
+    addQuad([x1, y2, z1], [x1, y2, z2], [x1, y1, z2], [x1, y1, z1], [-1, 0, 0]);
+    // Right (+X)
+    addQuad([x2, y1, z1], [x2, y1, z2], [x2, y2, z2], [x2, y2, z1], [1, 0, 0]);
+  }
+
+  // 1. Floor Slab
+  addBox(0, L, 0, W, 0, tf);
+  // 2. North Wall
+  addBox(0, L, W - tw, W, tf, H - tr);
+  // 3. East Wall
+  addBox(L - tw, L, tw, W - tw, tf, H - tr);
+  // 4. West Wall
+  addBox(0, tw, tw, W - tw, tf, H - tr);
+  // 5. South Wall with Window Aperture
+  const winX1 = Math.max(tw, L * 0.3);
+  const winX2 = Math.min(L - tw, L * 0.7);
+  const winZ1 = Math.max(tf, 0.8);
+  const winZ2 = Math.min(H - tr, 1.8);
+
+  addBox(0, L, 0, tw, tf, winZ1);
+  addBox(0, L, 0, tw, winZ2, H - tr);
+  addBox(0, winX1, 0, tw, winZ1, winZ2);
+  addBox(winX2, L, 0, tw, winZ1, winZ2);
+  // 6. Roof Slab
+  addBox(0, L, 0, W, H - tr, H);
+
+  facets.push('endsolid ShelterX_Bioclimatic_Shelter');
+  return facets.join('\n');
 }
 
 export function generateWorkbenchPythonScript(config: ShelterConfig): string {
